@@ -1,0 +1,28 @@
+250ms_1000k_10vms_1nodes,Avg,P50,P80,P90,P95,P99,P999,Max
+block broadcast latency (Sync/Min),0.58,0.53,0.86,0.95,1.03,2.00,4.20,5.14
+block broadcast latency (Sync/Avg),18.31,15.41,35.17,39.18,42.15,48.52,55.28,57.03
+block broadcast latency (Sync/P50),17.76,14.88,33.58,37.96,40.89,49.58,53.57,57.59
+block broadcast latency (Sync/P80),23.41,19.12,45.29,51.37,54.84,59.87,69.26,71.37
+block broadcast latency (Sync/P90),26.48,22.46,51.78,58.25,61.94,67.84,72.50,76.51
+block broadcast latency (Sync/P95),28.98,25.38,57.32,63.42,66.58,71.78,76.39,82.53
+block broadcast latency (Sync/P99),33.21,28.01,65.98,72.14,75.53,83.38,86.74,89.48
+block broadcast latency (Sync/P999),33.21,28.01,65.98,72.14,75.53,83.38,86.74,89.48
+block broadcast latency (Sync/Max),36.37,29.56,72.05,78.61,84.13,92.24,106.32,111.49
+block broadcast latency (Cons/Min),0.79,0.65,0.97,1.34,2.16,4.16,5.29,7.11
+block broadcast latency (Cons/Avg),19.25,15.57,37.32,42.81,45.14,50.88,56.62,58.17
+block broadcast latency (Cons/P50),18.72,15.03,35.93,40.36,44.33,51.83,56.47,57.75
+block broadcast latency (Cons/P80),24.33,19.74,47.43,55.22,58.38,61.08,70.72,73.14
+block broadcast latency (Cons/P90),27.37,22.72,53.46,61.95,64.09,69.24,75.00,77.99
+block broadcast latency (Cons/P95),29.89,25.43,59.41,66.56,69.65,75.20,77.61,86.67
+block broadcast latency (Cons/P99),34.89,28.22,70.73,78.10,81.24,90.84,93.27,93.27
+block broadcast latency (Cons/P999),34.89,28.22,70.73,78.10,81.24,90.84,93.27,93.27
+block broadcast latency (Cons/Max),38.21,29.83,76.78,84.79,91.72,100.87,109.06,112.78
+block txs,6782.18,8599,10249,10304,10308,10310,10310,10310
+block size,2604358.58,3302016,3935616,3956736,3958272,3959040,3959040,3959040
+block referees,17.28,15,28,34,39,44,46,48
+block generation interval,0.26,0.00,1.00,1.00,1.00,1.00,2.00,5.00
+node sync/cons gap (Avg),2.14,1.88,2.65,3.33,4.87,5.84,5.84,7.91
+node sync/cons gap (P50),0.01,0,0,0,0,0,0,1
+node sync/cons gap (P90),6.74,6,8,10,16,24,24,31
+node sync/cons gap (P99),17.66,14,24,36,40,46,46,68
+node sync/cons gap (Max),20.45,16,26,41,44,56,56,68
