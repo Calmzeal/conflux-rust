@@ -58,9 +58,10 @@ class P2PTest(ConfluxTestFramework):
         self.conf_parameters = {
             "start_mining": "true",
             "initial_difficulty": str(self.difficulty),
+            "test_mining_sleep_us": "10000",
             "mining_author": '"' + "0"*40 + '"',
             "log_level": "\"debug\"",
-            "headers_request_timeout_ms": "40000",  # need to be larger than network latency [What is it?]
+            "headers_request_timeout_ms": "30000",  # need to be larger than network latency [What is it?]
             "heavy_block_difficulty_ratio": "1000",  # parameter used in the original experiments
             "adaptive_weight_beta": "3000",  # parameter used in the original experiments
         }
@@ -122,7 +123,6 @@ class P2PTest(ConfluxTestFramework):
         while True:
             sample0 = randint(0,branch_leader-1)
             sample1 = randint(branch_leader,self.num_nodes-1)
-            print(sample0, sample1)
             # This roughly simulates adversary's mining power
             time.sleep(random.expovariate(1 / generation_period))
             chain0 = self._process_chain(self.nodes[sample0].getPivotChainAndWeight())
@@ -135,11 +135,11 @@ class P2PTest(ConfluxTestFramework):
             self.log.debug("Fork root %s %s", chain0[fork_height], chain1[fork_height])
             if fork0[0] == fork1[0]:
                 merged = True
-                # self.log.info("Pivot chain merged")
+                self.log.info("Pivot chain merged")
                 # self.log.info("chain0 %s", chain0)
                 # self.log.info("chain1 %s", chain1)
                 after_count += 1
-                if after_count >= 600 / generation_period:
+                if after_count >= 120 / generation_period:
                     self.log.info("Merged. Winner: %s Chain end with %s", fork0[0], chain0[min(len(chain0), len(chain1)) - 2][0])
                     break
                 continue
@@ -162,13 +162,15 @@ class P2PTest(ConfluxTestFramework):
                     
                     parent = fork0[0]
                     block = NewBlock(create_block(decode_hex(parent), height=fork_height+1, deferred_receipts_root=receipts_root, difficulty=self.difficulty, timestamp=int(time.time()), author=decode_hex("%040x" % random.randint(0, 2**32 - 1))))
-                    self.nodes[sample0].p2p.send_protocol_msg(block)
-                    self.log.debug("send to 0 block %s, weight %d %d", block.block.hash_hex(), fork0[1], fork1[1])
+                    for i in range(branch_leader):
+                        self.nodes[i].p2p.send_protocol_msg(block)
+                    self.log.info("send to 0 group block %s, weight %d %d", block.block.hash_hex(), fork0[1], fork1[1])
                 else:
                     parent = fork1[0]
                     block = NewBlock(create_block(decode_hex(parent), height=fork_height+1, deferred_receipts_root=receipts_root, difficulty=self.difficulty, timestamp=int(time.time()), author=decode_hex("%040x" % random.randint(0, 2**32 - 1))))
-                    self.nodes[sample1].p2p.send_protocol_msg(block)
-                    self.log.debug("send to 1 block %s, weight %d %d", block.block.hash_hex(), fork0[1], fork1[1])
+                    for i in range(branch_leader,self.num_nodes):
+                        self.nodes[i].p2p.send_protocol_msg(block)
+                    self.log.info("send to 1 group block %s, weight %d %d", block.block.hash_hex(), fork0[1], fork1[1])
         exit()
 
     # Convert weight to integer
@@ -180,10 +182,10 @@ class P2PTest(ConfluxTestFramework):
     def _check_chain_heavy(self, chain, chain_id, fork_height):
         for i in range(fork_height+1, len(chain)-1):
             if chain[i][1] - chain[i+1][1] >= self.difficulty * 240:
-                self.log.debug("chain %d is heavy at height %d %d %d", chain_id, i,  chain[i][1], chain[i+1][1])
+                self.log.info("chain %d is heavy at height %d %d %d", chain_id, i,  chain[i][1], chain[i+1][1])
                 return
         if chain[-1][1] >= self.difficulty * 240:
-            self.log.debug("chain %d is heavy at height %d %d %d", chain_id, i,  chain[i][1], chain[i+1][1])
+            self.log.info("chain %d is heavy at height %d %d %d", chain_id, i,  chain[i][1], chain[i+1][1])
 
 
 if __name__ == "__main__":
