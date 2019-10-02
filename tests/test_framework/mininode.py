@@ -546,7 +546,7 @@ def start_p2p_connection(nodes, remote=False):
 
     node_index = 0
     for node in nodes:
-        conn = DefaultNode(node_index,remote)
+        conn = DefaultNode(node_index,node,remote)
         node_index = node_index + 1
         p2p_connections.append(conn)
         node.add_p2p_connection(conn)
