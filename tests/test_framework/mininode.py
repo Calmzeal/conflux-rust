@@ -4,26 +4,25 @@
 `P2PConnection: A low-level connection object to a node's P2P interface
 P2PInterface: A high-level interface object for communicating to a node over P2P
 """
-from eth_utils import big_endian_to_int, encode_hex
+from eth_utils import encode_hex
 
 from conflux import utils
 from conflux.messages import *
 import asyncore
 from collections import defaultdict
-from io import BytesIO
 import rlp
-from rlp.sedes import binary, big_endian_int, CountableList, boolean
 import logging
 import socket
 import struct
-import sys
-import threading
 
-from conflux.transactions import Transaction
-from conflux.utils import hash32, hash20, sha3, int_to_bytes, sha3_256, ecrecover_to_pub, ec_random_keys, ecsign, \
-    bytes_to_int, encode_int32, int_to_hex, int_to_32bytearray, zpad, rzpad
+from conflux.rpc import RpcClient
+from conflux.utils import int_to_bytes, ec_random_keys,\
+   int_to_32bytearray, rzpad
 from test_framework.blocktools import make_genesis
 from test_framework.util import wait_until, get_ip_address
+from threading import Thread
+import queue
+
 
 logger = logging.getLogger("TestFramework.mininode")
 
@@ -43,7 +42,6 @@ class P2PConnection(asyncore.dispatcher):
 
     def __init__(self):
         assert not network_thread_running()
-
         super().__init__(map=mininode_socket_map)
 
     def peer_connect(self, dstaddr, dstport):
@@ -277,7 +275,6 @@ class P2PConnection(asyncore.dispatcher):
     # Class utility methods
 
     def _log_message(self, direction, msg):
-        return
         """Logs a message being sent or received over the connection."""
         if direction == "send":
             log_message = "Send message to "
@@ -288,6 +285,7 @@ class P2PConnection(asyncore.dispatcher):
         if len(log_message) > 500:
             log_message += "... (msg truncated)"
         logger.debug(log_message)
+        return
 
 
 class P2PInterface(P2PConnection):
@@ -302,7 +300,6 @@ class P2PInterface(P2PConnection):
 
     def __init__(self, remote=False):
         super().__init__()
-
         # Track number of messages of each type received and the most recent
         # message of each type
         self.message_count = defaultdict(int)
@@ -388,6 +385,14 @@ class P2PInterface(P2PConnection):
                 elif packet_type == GET_TERMINAL_BLOCK_HASHES_RESPONSE:
                     self._log_message("receive", "TERMINAL_BLOCK_HASHES, {} hashes".format(len(msg.hashes)))
                 elif packet_type == NEW_BLOCK_HASHES:
+                    if hasattr(self,"task_queue"):
+                        def intercept_block(listen_node, new_block_hashes):
+                            for new_block_hash in new_block_hashes:
+                                print(new_block_hash)
+                                x = RpcClient(listen_node).block_by_hash(new_block_hash)
+                                print(x)
+                        logger.debug("F**K, New Block Hashes")
+                        self.task_queue.add_task(intercept_block,self.listen_node, msg.block_hashes)
                     self._log_message("receive", "NEW_BLOCK_HASHES, {} hashes".format(len(msg.block_hashes)))
                 elif packet_type == GET_BLOCKS_RESPONSE:
                     self._log_message("receive", "BLOCKS, {} blocks".format(len(msg.blocks)))
@@ -467,6 +472,9 @@ class P2PInterface(P2PConnection):
         resp = BlockHashes(reqid=msg.reqid, hashes=[])
         self.send_protocol_msg(resp)
 
+
+
+
 # Keep our own socket map for asyncore, so that we can track disconnects
 # ourselves (to work around an issue with closing an asyncore socket when
 # using select)
@@ -480,14 +488,18 @@ mininode_socket_map = dict()
 # access to any data shared with the P2PInterface or P2PConnection.
 mininode_lock = threading.RLock()
 
+
 class DefaultNode(P2PInterface):
-    def __init__(self, remote = False):
+    def __init__(self, node_index, listen_node, remote = False):
         super().__init__(remote)
         self.protocol = b'cfx'
         self.protocol_version = 1
+        self.node_index = node_index,
+        self.listen_node = listen_node,
+        self.task_queue = TaskQueue()
+
 
 class NetworkThread(threading.Thread):
-
     def __init__(self):
         super().__init__(name="NetworkThread")
 
@@ -528,11 +540,14 @@ def network_thread_join(timeout=10):
         thread.join(timeout)
         assert not thread.is_alive()
 
+
 def start_p2p_connection(nodes, remote=False):
     p2p_connections = []
 
+    node_index = 0
     for node in nodes:
-        conn = DefaultNode(remote)
+        conn = DefaultNode(node_index,remote)
+        node_index = node_index + 1
         p2p_connections.append(conn)
         node.add_p2p_connection(conn)
 
@@ -542,6 +557,7 @@ def start_p2p_connection(nodes, remote=False):
         p2p.wait_for_status()
 
     return p2p_connections
+
 
 class Handshake:
     def __init__(self, peer: P2PInterface):
@@ -557,3 +573,23 @@ class Handshake:
         assert len(remote_node_id) == 64, "invalid node id length {}".format(len(remote_node_id))
         self.peer.peer_key = utils.encode_hex(remote_node_id)
         self.state = "StartSession"
+
+
+class TaskQueue(queue.Queue):
+    """ Single Consumer Task Queue Class Dealing with Nodes
+    """
+    def __init__(self):
+        super().__init__()
+        self.start()
+
+    def add_task(self,task, *args, **kwargs):
+        self.put((task, args, kwargs))
+
+    def start(self):
+        Thread(target=self.consumer, daemon=True).start()
+
+    def consumer(self):
+        while True:
+            item, args, kwargs = self.get()
+            item(*args, **kwargs)
+            self.task_done()

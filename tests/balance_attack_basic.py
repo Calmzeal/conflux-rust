@@ -1,45 +1,42 @@
 #!/usr/bin/env python3
 
-''' 2019-09-22, 09-23, 09-24
+""" 2019-10-01
     Log :
-    CurrentCode = functionality_substitution (annotation (Peilun's Code) )
+    @code.last_version
 
     Libraries introduction:
 
-    argparse - help rpc parse
-    http - conection
-    eth,conflux - block info storage <> comm message typing changer 
-    test_framework - including tools trigguering each phase in blockchain network establishment
-'''
+    "argparse" - help rpc parse
+    http - connection
+    eth, conflux - block info storage <> comm message typing changer
+    test_framework - including tools triggering each phase in blockchain network establishment
+"""
+
 from random import randint
 from argparse import ArgumentParser
-from http.client import CannotSendRequest
 from eth_utils import decode_hex
-from conflux.utils import encode_hex, privtoaddr, parse_as_int
-from test_framework.blocktools import create_transaction, create_block
+from conflux.utils import parse_as_int
+from test_framework.blocktools import create_block
 from test_framework.test_framework import ConfluxTestFramework
 from test_framework.mininode import *
 from test_framework.util import *
-# Warning: lot of unuseful import
 
 
-''' Def P2PTest [X : <BlockchainType>TestFramework -> Y: Class(_Auxiliary, f1, f2, f3)]
-    A 3 phase attacking test over a given blockchain test framework,
-    including setup_chain, setup_network, and run_test.
-'''
 class P2PTest(ConfluxTestFramework):
+    """ Def P2PTest [X : <BlockchainType>TestFramework -> Y: Class(_Auxiliary, f1, f2, f3)]
+        A 3 phase attacking test over a given blockchain test framework,
+        including setup_chain, setup_network, and run_test.
+    """
     def set_test_params(self):
         self.setup_clean_chain = True
-        # Modifiable: v.Peilun 2 -> v.Enlin 4
-        self.num_nodes = 4
+        self.num_nodes = 2
         self.start_attack = True
-        
 
-    def add_options(self, parser:ArgumentParser):
+    def add_options(self, parser: ArgumentParser):
         parser.add_argument(
             "--evil",
             dest="evil_rate",
-            # Modifiable: the minig power of the adversary part
+            # Modifiable: the mining power of the adversary part
             default=0.2,
             type=float,
         )
@@ -50,16 +47,16 @@ class P2PTest(ConfluxTestFramework):
         self.total_period = 0.25
         self.evil_rate = self.options.evil_rate
         # Modifiable: v.Peilun 2 -> v.Enlin num_nodes
-        self.difficulty = int(self.num_nodes / (1/self.total_period) / (1-self.evil_rate) * 100)
+        self.difficulty = int(self.num_nodes / (1 / self.total_period) / (1 - self.evil_rate) * 100)
         ''' Exp Proposition : The higher the difficulty is, the less probable to fork
         '''
-        #self.difficulty = 75    
+        # self.difficulty = 75
         print(self.difficulty)
         self.conf_parameters = {
             "start_mining": "true",
             "initial_difficulty": str(self.difficulty),
             "test_mining_sleep_us": "10000",
-            "mining_author": '"' + "0"*40 + '"',
+            "mining_author": '"' + "0" * 40 + '"',
             "log_level": "\"debug\"",
             "headers_request_timeout_ms": "30000",  # need to be larger than network latency [What is it?]
             "heavy_block_difficulty_ratio": "1000",  # parameter used in the original experiments
@@ -72,26 +69,28 @@ class P2PTest(ConfluxTestFramework):
         ''' Set the topology of the network: complete graph;
             Then set the latency over the topology
         '''
-        for i in range(self.num_nodes-1):
-            for j in range(i+1,self.num_nodes):
+        self.log.info("Connection Started")
+        for i in range(self.num_nodes - 1):
+            for j in range(i + 1, self.num_nodes):
                 connect_nodes(self.nodes, i, j)
         for i in range(self.num_nodes):
             for j in range(self.num_nodes):
                 if i != j:
                     self.nodes[i].addlatency(self.nodes[j].key, 10000)
+        self.log.info("Connection Finished")
 
     def run_test(self):
         start_p2p_connection(self.nodes)
-        generation_period = 1/(1/self.total_period * self.evil_rate)
+        generation_period = 1 / (1 / self.total_period * self.evil_rate)
         self.log.info("Adversary mining average period=%f", generation_period)
-        
+
         # Some blocks may have been mined before we setup the latency, [which code corresponds to the decalaration?]
         # so wait for the latency and find the fork point, [which code corresponds to the decalaration?]
         ''' Phase 1: Scan the chain every 0.1s until find a fork at a valid height
             between nodes[0] and nodes[branch_leader]
         '''
         finished = False
-        branch_leader = int(self.num_nodes/2)
+        branch_leader = int(self.num_nodes / 2)
         while not finished:
             chain0 = self._process_chain(self.nodes[0].getPivotChainAndWeight())
             chain1 = self._process_chain(self.nodes[branch_leader].getPivotChainAndWeight())
@@ -115,14 +114,14 @@ class P2PTest(ConfluxTestFramework):
             receipts_root = default_config["GENESIS_RECEIPTS_ROOT"]
 
         ''' Phase 2: At each given adversary block generation moment (decided by adversary's mining power),
-            send blocks to each fork until they merge and are stablized. 
+            send blocks to each fork until they merge and are stabilized. 
         '''
         count = 0
         after_count = 0
         merged = False
         while True:
-            sample0 = randint(0,branch_leader-1)
-            sample1 = randint(branch_leader,self.num_nodes-1)
+            sample0 = randint(0, branch_leader - 1)
+            sample1 = randint(branch_leader, self.num_nodes - 1)
             # This roughly simulates adversary's mining power
             time.sleep(random.expovariate(1 / generation_period))
             chain0 = self._process_chain(self.nodes[sample0].getPivotChainAndWeight())
@@ -140,7 +139,8 @@ class P2PTest(ConfluxTestFramework):
                 # self.log.info("chain1 %s", chain1)
                 after_count += 1
                 if after_count >= 120 / generation_period:
-                    self.log.info("Merged. Winner: %s Chain end with %s", fork0[0], chain0[min(len(chain0), len(chain1)) - 2][0])
+                    self.log.info("Merged. Winner: %s Chain end with %s", fork0[0],
+                                  chain0[min(len(chain0), len(chain1)) - 2][0])
                     break
                 continue
 
@@ -159,16 +159,22 @@ class P2PTest(ConfluxTestFramework):
                     else:
                         send1 = False
                 if send1:
-                    
+
                     parent = fork0[0]
-                    block = NewBlock(create_block(decode_hex(parent), height=fork_height+1, deferred_receipts_root=receipts_root, difficulty=self.difficulty, timestamp=int(time.time()), author=decode_hex("%040x" % random.randint(0, 2**32 - 1))))
+                    block = NewBlock(
+                        create_block(decode_hex(parent), height=fork_height + 1, deferred_receipts_root=receipts_root,
+                                     difficulty=self.difficulty, timestamp=int(time.time()),
+                                     author=decode_hex("%040x" % random.randint(0, 2 ** 32 - 1))))
                     for i in range(branch_leader):
                         self.nodes[i].p2p.send_protocol_msg(block)
                     self.log.info("send to 0 group block %s, weight %d %d", block.block.hash_hex(), fork0[1], fork1[1])
                 else:
                     parent = fork1[0]
-                    block = NewBlock(create_block(decode_hex(parent), height=fork_height+1, deferred_receipts_root=receipts_root, difficulty=self.difficulty, timestamp=int(time.time()), author=decode_hex("%040x" % random.randint(0, 2**32 - 1))))
-                    for i in range(branch_leader,self.num_nodes):
+                    block = NewBlock(
+                        create_block(decode_hex(parent), height=fork_height + 1, deferred_receipts_root=receipts_root,
+                                     difficulty=self.difficulty, timestamp=int(time.time()),
+                                     author=decode_hex("%040x" % random.randint(0, 2 ** 32 - 1))))
+                    for i in range(branch_leader, self.num_nodes):
                         self.nodes[i].p2p.send_protocol_msg(block)
                     self.log.info("send to 1 group block %s, weight %d %d", block.block.hash_hex(), fork0[1], fork1[1])
         exit()
@@ -180,12 +186,12 @@ class P2PTest(ConfluxTestFramework):
         return chain
 
     def _check_chain_heavy(self, chain, chain_id, fork_height):
-        for i in range(fork_height+1, len(chain)-1):
-            if chain[i][1] - chain[i+1][1] >= self.difficulty * 240:
-                self.log.info("chain %d is heavy at height %d %d %d", chain_id, i,  chain[i][1], chain[i+1][1])
+        for i in range(fork_height + 1, len(chain) - 1):
+            if chain[i][1] - chain[i + 1][1] >= self.difficulty * 240:
+                self.log.info("chain %d is heavy at height %d %d %d", chain_id, i, chain[i][1], chain[i + 1][1])
                 return
         if chain[-1][1] >= self.difficulty * 240:
-            self.log.info("chain %d is heavy at height %d %d %d", chain_id, i,  chain[i][1], chain[i+1][1])
+            self.log.info("chain %d is heavy at height %d %d %d", chain_id, i, chain[i][1], chain[i + 1][1])
 
 
 if __name__ == "__main__":
