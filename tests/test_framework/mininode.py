@@ -386,12 +386,28 @@ class P2PInterface(P2PConnection):
                     self._log_message("receive", "TERMINAL_BLOCK_HASHES, {} hashes".format(len(msg.hashes)))
                 elif packet_type == NEW_BLOCK_HASHES:
                     if hasattr(self,"task_queue"):
-                        def intercept_block(node_index,listen_node, new_block_hashes):
+                        def intercept_block(listen_node, new_block_hashes):
                             for new_block_hash in new_block_hashes:
                                 x = RpcClient(listen_node).block_by_hash(encode_hex(new_block_hash))
-                                print(node_index,x)
-                                logger.debug(node_index,x)
-                        self.task_queue.add_task(intercept_block,self.node_index,self.listen_node, msg.block_hashes)
+                                if listen_node.cache.get(x["hash"]) is None:
+                                    foo = listen_node.weight.get(x["hash"])
+                                    if foo is None:
+                                        listen_node.weight.update({x["hash"]: 1})
+                                        foo = 1
+                                    listen_node.cache.update({x["hash"]: x["parentHash"]})
+                                    tmp = x["hash"]
+                                    while not (listen_node.cache.get(tmp) is None):
+                                        bar = listen_node.weight.get(tmp)
+                                        tmp = listen_node.cache.get(tmp)
+                                        res = listen_node.weight.get(tmp)
+                                        if res is None:
+                                            listen_node.weight.update({tmp: bar})
+                                        else:
+                                            ans = res + foo
+                                            listen_node.weight.update({tmp: ans})
+
+                            # logger.debug(node_index,x["hash"],x["parentHash"])
+                        self.task_queue.add_task(intercept_block,self.listen_node, msg.block_hashes)
                     self._log_message("receive", "NEW_BLOCK_HASHES, {} hashes".format(len(msg.block_hashes)))
                 elif packet_type == GET_BLOCKS_RESPONSE:
                     self._log_message("receive", "BLOCKS, {} blocks".format(len(msg.blocks)))
@@ -489,11 +505,10 @@ mininode_lock = threading.RLock()
 
 
 class DefaultNode(P2PInterface):
-    def __init__(self, node_index, listen_node, remote = False):
+    def __init__(self, listen_node, remote = False):
         super().__init__(remote)
         self.protocol = b'cfx'
         self.protocol_version = 1
-        self.node_index = node_index
         self.listen_node = listen_node
         self.task_queue = TaskQueue()
 
@@ -543,10 +558,8 @@ def network_thread_join(timeout=10):
 def start_p2p_connection(nodes, remote=False):
     p2p_connections = []
 
-    node_index = 0
     for node in nodes:
-        conn = DefaultNode(node_index,node,remote)
-        node_index = node_index + 1
+        conn = DefaultNode(node,remote)
         p2p_connections.append(conn)
         node.add_p2p_connection(conn)
 
