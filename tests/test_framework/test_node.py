@@ -67,8 +67,6 @@ class TestNode:
         self.cleanup_on_exit = True
         # self.key = "0x" + "0"*125+"{:03d}".format(self.index);
         self.p2ps = []
-        self.cache = {}
-        self.weight = {}
 
 
     def _node_msg(self, msg: str) -> str:

@@ -12,3 +12,13 @@ print(car.items())
 print(car.values())
 car.update({"brand":"dfs"})
 print(car)
+
+if car:
+    print("Yes")
+else:
+    print(bool({}))
+print(bool({"s":2}))
+
+a = []
+a.append()
+print(a)

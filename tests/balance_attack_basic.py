@@ -29,10 +29,17 @@ class P2PTest(ConfluxTestFramework):
     """
     def set_test_params(self):
         self.setup_clean_chain = True
-        self.num_nodes = 4
+        self.num_nodes = 2
         self.start_attack = True
-        self.branch_leader = int(self.num_nodes / 2)
-        self.fork_hash_list = []
+        # branch_leader is calculated in _getfork_and_sethash() according to definition:
+        # 1. node[0..branch_leader][fork_height] are equal
+        # 2. node[branch_leader][fork_height] != node[branch_leader+1]
+        # We group the nodes in [0..branch_leader]+several nodes as group 1 and others as group 2
+        self.branch_leader = None
+        self.lhash = None
+        self.rhash = None
+        # task_queue store the received new blocks to construct the global tree graph
+        self.task_queue = TaskQueue()
 
     def add_options(self, parser: ArgumentParser):
         parser.add_argument(
@@ -57,10 +64,10 @@ class P2PTest(ConfluxTestFramework):
         self.conf_parameters = {
             "start_mining": "true",
             "initial_difficulty": str(self.difficulty),
-            "test_mining_sleep_us": "10000",
+            "test_mining_sleep_us": "10000",  # mining might have happened before the network is set up.
             "mining_author": '"' + "0" * 40 + '"',
             "log_level": "\"debug\"",
-            "headers_request_timeout_ms": "30000",  # need to be larger than network latency [What is it?]
+            "headers_request_timeout_ms": "30000",  # need to be larger than network latency
             "heavy_block_difficulty_ratio": "1000",  # parameter used in the original experiments
             "adaptive_weight_beta": "3000",  # parameter used in the original experiments
         }
@@ -82,140 +89,100 @@ class P2PTest(ConfluxTestFramework):
         self.log.info("Connection Finished")
 
     def run_test(self):
-        start_p2p_connection(self.nodes)
+        #Connect mininodes to cfx nodes
+        start_p2p_connection(self.nodes,False,self.task_queue)
+
         generation_period = 1 / (1 / self.total_period * self.evil_rate)
         self.log.info("Adversary mining average period=%f", generation_period)
-        ''' Phase 1: Scan the chain every 0.1s until find a fork at a valid height
-            between nodes[0] and nodes[branch_leader]
-        '''
-        fork_height,receipts_root = self._getfork()
-        print(self.fork_hash_list)
-        ''' Phase 2: At each given adversary block generation moment (decided by adversary's mining power),
-            send blocks to each fork until they merge and are stabilized. 
-        '''
-        branch_leader = self.branch_leader
+
+        # Scan the pivot chains to get the fork height and store the two branches' hashes
+        fork_height, receipts_root = self._getfork_and_sethash()
+
+        # Set the attacking groups
+        cnt = 0
+        ltarget = [self.branch_leader]
+        rtarget = [self.branch_leader+1]
+        for i in range(self.num_nodes):
+            if i == self.branch_leader or i == self.branch_leader+1:
+                continue
+            cnt += 1
+            if cnt < (self.num_nodes / 2):
+                ltarget.append(i)
+            else:
+                rtarget.append(i)
+        print(ltarget, rtarget)
+
+        # Executed the attacks
         count = 0
         after_count = 0
         merged = False
-        weights_old = [0]*self.num_nodes
-        while True:
+        while self.start_attack:
             # This roughly simulates adversary's mining power
             time.sleep(random.expovariate(1 / generation_period))
-            # chain0 = self._process_chain(self.nodes[0].getPivotChainAndWeight())
-            # self._check_chain_heavy(chain0, 0, fork_height)
-            # chain1 = self._process_chain(self.nodes[1].getPivotChainAndWeight())
-            # self._check_chain_heavy(chain1, 1, fork_height)
-            # assert_equal(chain0[0][0], chain1[0][0])
-            # fork0 = chain0[fork_height]
-            # fork1 = chain1[fork_height]
-            comparable = True
-            stable = True
-            weights = []
-
-            for i in range(self.num_nodes):
-                tmp = self.nodes[i].weight.get(self.fork_hash_list[i])
-                if tmp is None:
-                    comparable = False
-                    break
-                weights.append(tmp)
-                if weights[i] !=  weights_old[i]:
-                    stable = False
+            # Get the subtree weight of the two branches
+            comparable, lweight, rweight = self._getweights()
             if comparable:
-                print(weights)
+                print(lweight,rweight)
+                print(len(self.task_queue.parent_map))
             else:
+                print(len(self.task_queue.parent_map))
                 continue
 
-            weights_old = weights
-
-            if stable:
-               after_count = after_count + 1
-            else:
-                if after_count > 600:
-                    merged = True
-                    self.log.info("Pivot chain merged")
-                    break
-                else:
-                    after_count = 0
+            # Check test's termination
             count = count + 1
             if count > 2400:
                 self.log.info("Not merged after 40 min")
                 break
 
-            # print(weights)
-            # print(fork0,fork1)
-            # self.log.debug("Fork root %s %s", chain0[fork_height], chain1[fork_height])
-            # if fork0[0] == fork1[0]:
-            #     merged = True
-            #     self.log.info("Pivot chain merged")
-            #     self.log.info("chain0 %s", chain0)
-            #     self.log.info("chain1 %s", chain1)
-            #     after_count += 1
-            #     if after_count >= 120 / generation_period:
-            #         self.log.info("Merged. Winner: %s Chain end with %s", fork0[0],
-            #                       chain0[min(len(chain0), len(chain1)) - 2][0])
-            #         break
-            #     continue
-            # count += 1
-            # if count >= 2400 / generation_period:
-            #     self.log.info("Not merged after 40 min")
-            #     break
-            ''' Send blocks to keep balance.
-                The adversary's mining power and strategy is not strictly designed in the naive version.
-                If two forks are already balanced, we need to send blocks to both sides in case no blocks are mined.
-            '''
-
-            if self.start_attack:
-                target = min(weights)
-                for i in range(self.num_nodes):
-                    if weights[i]==target:
-                        parent = self.fork_hash_list[i]
-                        block = NewBlock(
-                            create_block(decode_hex(parent), height=fork_height + 1, deferred_receipts_root=receipts_root,
-                                     difficulty=self.difficulty, timestamp=int(time.time()),
-                                     author=decode_hex("%040x" % random.randint(0, 2 ** 32 - 1))))
-                        self.log.info("send to %d group block %s", i, block.block.hash_hex())
+            # Check merge every 100 period of attack
+            if count%100 == 0:
+                chain = self._snapshot_chain()
+                merged = True
+                for i in range(self.num_nodes-1):
+                    merged &= chain[i][fork_height][0] == chain[i+1][fork_height][0]
+                self._check_chain_heavy(chain[0], 0, fork_height)
+                if merged:
+                    self.log.info("Pivot chain merged")
+                    after_count += 1
+                    if after_count >= 3 / generation_period:
+                        self.log.info("Merged. Winner: %s among [%s,%s]", chain[0][fork_height][0],self.lhash,self.rhash)
                         break
 
-
-            # if self.start_attack:
-            #     if not merged:
-            #         if fork0[1] < fork1[1] or (fork0[1] == fork1[1] and fork0[0] < fork1[0]):
-            #             send1 = True
-            #         else:
-            #             send1 = False
-            #     if send1:
-            #         parent = fork0[0]
-            #         block = NewBlock(
-            #             create_block(decode_hex(parent), height=fork_height + 1, deferred_receipts_root=receipts_root,
-            #                          difficulty=self.difficulty, timestamp=int(time.time()),
-            #                          author=decode_hex("%040x" % random.randint(0, 2 ** 32 - 1))))
-            #         for i in range(branch_leader):
-            #             self.nodes[i].p2p.send_protocol_msg(block)
-            #         # self.log.info("send to 0 group block %s, weight %d %d", block.block.hash_hex(), fork0[1], fork1[1])
-            #     else:
-            #         parent = fork1[0]
-            #         block = NewBlock(
-            #             create_block(decode_hex(parent), height=fork_height + 1, deferred_receipts_root=receipts_root,
-            #                          difficulty=self.difficulty, timestamp=int(time.time()),
-            #                          author=decode_hex("%040x" % random.randint(0, 2 ** 32 - 1))))
-            #         for i in range(branch_leader, self.num_nodes):
-            #             self.nodes[i].p2p.send_protocol_msg(block)
-                    # self.log.info("send to 1 group block %s, weight %d %d", block.block.hash_hex(), fork0[1], fork1[1])
+            # Attack
+            if not merged:
+                to_left = lweight <= rweight
+                parent,target = (self.lhash, ltarget) if to_left else (self.rhash, rtarget)
+                block = NewBlock(
+                    create_block(decode_hex(parent), height=fork_height + 1, deferred_receipts_root=receipts_root,
+                                 difficulty=self.difficulty, timestamp=int(time.time()),
+                                 author=decode_hex("%040x" % random.randint(0, 2 ** 32 - 1))))
+                for i in target:
+                    self.nodes[i].p2p.send_protocol_msg(block)
+                self.log.info("send to %s group block %s", parent, block.block.hash_hex())
         exit()
 
-    def _getfork(self):
+    def _getweights(self):
+        '''
+        :return: comparable:bool, lweight, rweight
+        '''
+        q = self.task_queue
+        lweight = q.weight.get(self.lhash)
+        rweight = q.weight.get(self.rhash)
+        return not ((lweight is None) | (rweight is None)),lweight,rweight
+
+    def _snapshot_chain(self):
+        chain = []
+        for i in range(self.num_nodes):
+            chain.append(self._process_chain(self.nodes[i].getPivotChainAndWeight()))
+        return chain
+
+    def _getfork_and_sethash(self):
         ''' snapshot(non-atomic) the pivot chain of each cfx node,
             scan the snapshot to find the fork height
-        :return: fork_height, receipt at the fork point.
+        :return: fork_block_hashes, fork_height, receipt at the fork point.
         '''
-        fork_found = False
-        branch_leader = self.branch_leader
-        self.fork_hash_list = []
-        chain = []
-        while not fork_found:
-            chain = []
-            for i in range(self.num_nodes):
-                chain.append(self._process_chain(self.nodes[i].getPivotChainAndWeight()))
+        while True:
+            chain = self._snapshot_chain()
             height = 0
             finished = False
             while not finished:
@@ -230,14 +197,22 @@ class P2PTest(ConfluxTestFramework):
                     break
                 for i in range(self.num_nodes-1):
                     if chain[i][height][0] != chain[i+1][height][0]:
-                        self.log.info("Forked at height %d %s %s", height, chain[i][height],chain[i+1][height])
-                        for j in range(self.num_nodes):
-                            self.fork_hash_list.append(chain[j][height][0])
-                        if height >= 5:
+                        self.branch_leader = i
+                        self.lhash = chain[i][height][0]
+                        self.rhash = chain[i+1][height][0]
+                        time.sleep(20)
+                        comparable, lweight, rweight = self._getweights()
+                        if comparable:
+                            self.log.info("Forked at height %d %s %s", height, chain[i][height], chain[i + 1][height])
                             # Our generated block has height fork_height+1, so its deferred block is fork_height-4
-                            return height, decode_hex(self.nodes[0].getExecutedInfo(chain[0][height - 4][0])[0])
+                            receipts_root = decode_hex(self.nodes[i].getExecutedInfo(chain[i][height - 4][0])[0])\
+                                if height >= 5 else default_config["GENESIS_RECEIPTS_ROOT"]
+                            return height, receipts_root
                         else:
-                            return height, default_config["GENESIS_RECEIPTS_ROOT"]
+                            print(lweight,rweight)
+                            self.log.info("Fork block unreceived... retry")
+                            finished = True
+                            break
                 height += 1
 
 
@@ -255,6 +230,26 @@ class P2PTest(ConfluxTestFramework):
         if chain[-1][1] >= self.difficulty * 240:
             self.log.info("chain %d is heavy at height %d %d %d", chain_id, i, chain[i][1], chain[i + 1][1])
 
+class TaskQueue(queue.Queue):
+    """ Single Consumer Task Queue Class Dealing with Nodes
+    """
+    def __init__(self):
+        super().__init__()
+        self.parent_map = {}
+        self.weight = {}
+        self.start()
+
+    def add_task(self,task, *args, **kwargs):
+        self.put((task, args, kwargs))
+
+    def start(self):
+        Thread(target=self.consumer, daemon=True).start()
+
+    def consumer(self):
+        while True:
+            item, args, kwargs = self.get()
+            item(*args, **kwargs)
+            self.task_done()
 
 if __name__ == "__main__":
     P2PTest().main()
