@@ -11,15 +11,19 @@
     eth, conflux - block info storage <> comm message typing changer
     test_framework - including tools triggering each phase in blockchain network establishment
 """
-
-from random import randint
+import os
+import queue
 from argparse import ArgumentParser
-from eth_utils import decode_hex
+from threading import Thread
+
 from conflux.utils import parse_as_int
 from test_framework.blocktools import create_block
 from test_framework.test_framework import ConfluxTestFramework
 from test_framework.mininode import *
 from test_framework.util import *
+
+from tests.conflux.rpc import RpcClient
+from eth_utils import encode_hex, decode_hex
 
 
 class P2PTest(ConfluxTestFramework):
@@ -29,16 +33,9 @@ class P2PTest(ConfluxTestFramework):
     """
     def set_test_params(self):
         self.setup_clean_chain = True
-        self.num_nodes = 2
+        self.num_nodes = 6
         self.start_attack = True
-        # branch_leader is calculated in _getfork_and_sethash() according to definition:
-        # 1. node[0..branch_leader][fork_height] are equal
-        # 2. node[branch_leader][fork_height] != node[branch_leader+1]
-        # We group the nodes in [0..branch_leader]+several nodes as group 1 and others as group 2
-        self.branch_leader = None
-        self.lhash = None
-        self.rhash = None
-        # task_queue store the received new blocks to construct the global tree graph
+        self.target = AttackTarget(self.num_nodes)
         self.task_queue = TaskQueue()
 
     def add_options(self, parser: ArgumentParser):
@@ -52,14 +49,12 @@ class P2PTest(ConfluxTestFramework):
 
     def setup_chain(self):
         self.log.info("Initializing test directory " + self.options.tmpdir)
-        # Modifiable: the expected block generation rate for the whole chain
+
         self.total_period = 0.25
         self.evil_rate = self.options.evil_rate
-        # Modifiable: v.Peilun 2 -> v.Enlin num_nodes
         self.difficulty = int(self.num_nodes / (1 / self.total_period) / (1 - self.evil_rate) * 100)
-        ''' Exp Proposition : The higher the difficulty is, the less probable to fork
-        '''
-        # self.difficulty = 75
+        self.target.difficulty = self.difficulty
+
         print(self.difficulty)
         self.conf_parameters = {
             "start_mining": "true",
@@ -89,100 +84,108 @@ class P2PTest(ConfluxTestFramework):
         self.log.info("Connection Finished")
 
     def run_test(self):
-        #Connect mininodes to cfx nodes
-        start_p2p_connection(self.nodes,False,self.task_queue)
+        # Connect mininodes to cfx nodes
+        start_p2p_connection(self.nodes,False,self.task_queue,self.target) # remote = False
 
         generation_period = 1 / (1 / self.total_period * self.evil_rate)
         self.log.info("Adversary mining average period=%f", generation_period)
 
-        # Scan the pivot chains to get the fork height and store the two branches' hashes
-        fork_height, receipts_root = self._getfork_and_sethash()
-
-        # Set the attacking groups
-        cnt = 0
-        ltarget = [self.branch_leader]
-        rtarget = [self.branch_leader+1]
-        for i in range(self.num_nodes):
-            if i == self.branch_leader or i == self.branch_leader+1:
-                continue
-            cnt += 1
-            if cnt < (self.num_nodes / 2):
-                ltarget.append(i)
-            else:
-                rtarget.append(i)
-        print(ltarget, rtarget)
+        self.set_target()
 
         # Executed the attacks
         count = 0
         after_count = 0
+        scan_freq = 20
+        threshhold = 0
         merged = False
+        t = self.target
+        lblock_queue = queue.Queue()
+        rblock_queue = queue.Queue()
+        chain = []
+
         while self.start_attack:
             # This roughly simulates adversary's mining power
             time.sleep(random.expovariate(1 / generation_period))
+
             # Get the subtree weight of the two branches
-            comparable, lweight, rweight = self._getweights()
-            if comparable:
-                print(lweight,rweight)
-                print(len(self.task_queue.parent_map))
-            else:
-                print(len(self.task_queue.parent_map))
-                continue
+            _,lweight,rweight = t.get_weights(t.lhash,t.rhash)
+            self.log.info("Left:{}, Right:{}, Delta:{} #Lqueue：{}, Rqueue:{} #Downloading blocks:{}" \
+                          .format(lweight, rweight, abs(lweight - rweight),lblock_queue.qsize(),rblock_queue.qsize(), len(t.weight)))
 
             # Check test's termination
-            count = count + 1
-            if count > 2400:
-                self.log.info("Not merged after 40 min")
+            count += 1
+            if count > 2400 / generation_period:
+                self.log.info("Not merged after 40 minutes")
                 break
 
             # Check merge every 100 period of attack
-            if count%100 == 0:
-                chain = self._snapshot_chain()
+            if count%scan_freq == 0:
+                chain = self.get_chains()
+
+                weights = list(map(lambda x:t.weight.get(chain[x][t.fork_height][0]),range(self.num_nodes)))
+                values = set(weights)
+                print(values)
+                if len(values) <= 2:
+                    threshhold = 4
                 merged = True
                 for i in range(self.num_nodes-1):
-                    merged &= chain[i][fork_height][0] == chain[i+1][fork_height][0]
-                self._check_chain_heavy(chain[0], 0, fork_height)
+                    merged &= chain[i][t.fork_height][0] == chain[i+1][t.fork_height][0]
+
+                #self.check_chain_heavy(chain[0], 0, t.fork_height)
                 if merged:
                     self.log.info("Pivot chain merged")
+                    scan_freq = 1
                     after_count += 1
-                    if after_count >= 3 / generation_period:
-                        self.log.info("Merged. Winner: %s among [%s,%s]", chain[0][fork_height][0],self.lhash,self.rhash)
+                    if after_count >= 20 / generation_period:
+                        self.log.info("Merged. Winner: %s among [%s,%s]", chain[0][t.fork_height][0],t.lhash,t.rhash)
                         break
+                elif after_count > 0:
+                    after_count = 0
+                    scan_freq = 5
 
-            # Attack
-            if not merged:
-                to_left = lweight <= rweight
-                parent,target = (self.lhash, ltarget) if to_left else (self.rhash, rtarget)
-                block = NewBlock(
-                    create_block(decode_hex(parent), height=fork_height + 1, deferred_receipts_root=receipts_root,
-                                 difficulty=self.difficulty, timestamp=int(time.time()),
-                                 author=decode_hex("%040x" % random.randint(0, 2 ** 32 - 1))))
-                for i in target:
-                    self.nodes[i].p2p.send_protocol_msg(block)
-                self.log.info("send to %s group block %s", parent, block.block.hash_hex())
+            # Attack even pivot chain are merged
+            to_left = lweight + lblock_queue.qsize() <= rweight + rblock_queue.qsize()
+            parent, q = (t.lhash, lblock_queue) if to_left else (t.rhash, rblock_queue)
+            q.put(NewBlock(
+                create_block(decode_hex(parent), height=t.fork_height + 1, deferred_receipts_root=t.receipts_root,
+                             difficulty=self.difficulty, timestamp=int(time.time()),
+                             author=decode_hex("%040x" % random.randint(0, 2 ** 32 - 1)))))
+
+            send_count = (abs(lweight - rweight) + int((1 - self.evil_rate) / self.evil_rate)) if merged else abs(lweight - rweight)
+            if send_count>=threshhold:
+                group, targetlist = ("right", t.rtarget) if (lweight-rweight>0) else ("left", t.ltarget)
+                if merged:
+                    group, targetlist = ("right", t.rtarget) if (t.rhash != chain[0][t.fork_height][0]) else ("left", t.ltarget)
+                for k in range(send_count):
+                    if q.empty():
+                        break
+                    blk = q.get()
+                    for i in targetlist:
+                        self.nodes[i].p2p.send_protocol_msg(blk)
+                    self.log.info("send to %s group block %s", group, blk.block.hash_hex())
+
+        os.system("killall conflux")
         exit()
 
-    def _getweights(self):
-        '''
-        :return: comparable:bool, lweight, rweight
-        '''
-        q = self.task_queue
-        lweight = q.weight.get(self.lhash)
-        rweight = q.weight.get(self.rhash)
-        return not ((lweight is None) | (rweight is None)),lweight,rweight
 
-    def _snapshot_chain(self):
+
+
+    def get_chains(self):
+        '''
+        :return: list of pivot chain from different cfx nodes
+        '''
         chain = []
         for i in range(self.num_nodes):
             chain.append(self._process_chain(self.nodes[i].getPivotChainAndWeight()))
         return chain
 
-    def _getfork_and_sethash(self):
+    def set_target(self):
         ''' snapshot(non-atomic) the pivot chain of each cfx node,
-            scan the snapshot to find the fork height
-        :return: fork_block_hashes, fork_height, receipt at the fork point.
+            scan the snapshot to find the fork height,
+            then set self.target
         '''
         while True:
-            chain = self._snapshot_chain()
+            chain = self.get_chains()
             height = 0
             finished = False
             while not finished:
@@ -197,19 +200,19 @@ class P2PTest(ConfluxTestFramework):
                     break
                 for i in range(self.num_nodes-1):
                     if chain[i][height][0] != chain[i+1][height][0]:
-                        self.branch_leader = i
-                        self.lhash = chain[i][height][0]
-                        self.rhash = chain[i+1][height][0]
-                        time.sleep(20)
-                        comparable, lweight, rweight = self._getweights()
-                        if comparable:
+                        lhash = chain[i][height][0]
+                        rhash = chain[i+1][height][0]
+                        time.sleep(25)
+                        received,l,r = self.target.get_weights(lhash,rhash)
+                        if received:
                             self.log.info("Forked at height %d %s %s", height, chain[i][height], chain[i + 1][height])
                             # Our generated block has height fork_height+1, so its deferred block is fork_height-4
                             receipts_root = decode_hex(self.nodes[i].getExecutedInfo(chain[i][height - 4][0])[0])\
                                 if height >= 5 else default_config["GENESIS_RECEIPTS_ROOT"]
-                            return height, receipts_root
+                            self.target.set_params(i,lhash,rhash,height,receipts_root)
+                            return None
                         else:
-                            print(lweight,rweight)
+                            print(l,r)
                             self.log.info("Fork block unreceived... retry")
                             finished = True
                             break
@@ -222,7 +225,7 @@ class P2PTest(ConfluxTestFramework):
             chain[i][1] = parse_as_int(chain[i][1])
         return chain
 
-    def _check_chain_heavy(self, chain, chain_id, fork_height):
+    def check_chain_heavy(self, chain, chain_id, fork_height):
         for i in range(fork_height + 1, len(chain) - 1):
             if chain[i][1] - chain[i + 1][1] >= self.difficulty * 240:
                 self.log.info("chain %d is heavy at height %d %d %d", chain_id, i, chain[i][1], chain[i + 1][1])
@@ -230,13 +233,71 @@ class P2PTest(ConfluxTestFramework):
         if chain[-1][1] >= self.difficulty * 240:
             self.log.info("chain %d is heavy at height %d %d %d", chain_id, i, chain[i][1], chain[i + 1][1])
 
+
+class AttackTarget:
+    """ Define the scale of the network, the attack strategy and parameters
+    """
+    def __init__(self,num_nodes):
+        self.ltarget = list(range(0, num_nodes, 2))
+        self.rtarget = list(range(1, num_nodes, 2))
+        # The following dictionaries store the received new blocks and construct the global tree graph
+        def f(t, node, new_block_hashes):
+            for h in new_block_hashes:
+                x = RpcClient(node).block_by_hash(encode_hex(h))
+                difficulty = int(x['difficulty'],0)
+                if difficulty > t.difficulty * 240:
+                    print("Heavy block comes from node {} with difficulty {}".format(node.index, difficulty))
+                relative_weight = int(difficulty/t.difficulty)
+                if t.parent_map.get(x["hash"]) is None:
+                    original_weight = t.weight.get(x["hash"])
+                    if original_weight is None:
+                        t.weight.update({x["hash"]: relative_weight})
+                        original_weight = relative_weight
+                    t.parent_map.update({x["hash"]: x["parentHash"]})
+                    child = x["hash"]
+                    parent = t.parent_map.get(child)
+                    parent_weight = t.weight.get(parent)
+                    if parent_weight is None:
+                        t.weight.update({parent: original_weight})
+                    else:
+                        while not (parent is None):
+                            parent_weight += original_weight
+                            t.weight.update({parent: parent_weight})
+                            child = parent
+                            parent = t.parent_map.get(child)
+                            parent_weight = t.weight.get(parent)
+
+        self.parse_block_hashes = f
+        self.parent_map = {}
+        self.weight = {}
+
+    def set_params(self,branch_leader,lhash,rhash,fork_height,receipts_root):
+        self.branch_leader = branch_leader
+        self.lhash = lhash
+        self.rhash = rhash
+        self.fork_height = fork_height
+        self.receipts_root = receipts_root
+
+        if branch_leader in self.rtarget:
+            self.rtarget.remove(branch_leader)
+            self.ltarget.append(branch_leader)
+        if (branch_leader + 1) in self.ltarget:
+            self.ltarget.remove(branch_leader + 1)
+            self.rtarget.append(branch_leader + 1)
+
+    def get_weights(self,lhash,rhash):
+        '''
+        :return: received:bool, lweight, rweight
+        '''
+        lweight = self.weight.get(lhash)
+        rweight = self.weight.get(rhash)
+        return not ((lweight is None) | (rweight is None)),lweight,rweight
+
 class TaskQueue(queue.Queue):
     """ Single Consumer Task Queue Class Dealing with Nodes
     """
     def __init__(self):
         super().__init__()
-        self.parent_map = {}
-        self.weight = {}
         self.start()
 
     def add_task(self,task, *args, **kwargs):

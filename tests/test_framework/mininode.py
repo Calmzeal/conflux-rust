@@ -15,13 +15,11 @@ import logging
 import socket
 import struct
 
-from conflux.rpc import RpcClient
+
 from conflux.utils import int_to_bytes, ec_random_keys,\
    int_to_32bytearray, rzpad
 from test_framework.blocktools import make_genesis
 from test_framework.util import wait_until, get_ip_address
-from threading import Thread
-import queue
 
 
 logger = logging.getLogger("TestFramework.mininode")
@@ -387,36 +385,10 @@ class P2PInterface(P2PConnection):
                     self._log_message("receive", "TERMINAL_BLOCK_HASHES, {} hashes".format(len(msg.hashes)))
                 elif packet_type == NEW_BLOCK_HASHES:
                     if hasattr(self,"task_queue"):
-                        def intercept_block(task_queue,listen_node,new_block_hashes):
-                            q = task_queue
-                            for new_block_hash in new_block_hashes:
-                                x = RpcClient(listen_node).block_by_hash(encode_hex(new_block_hash))
-
-                                if q.parent_map.get(x["hash"]) is None:
-                                    original_weight = q.weight.get(x["hash"])
-                                    if original_weight is None:
-                                        q.weight.update({x["hash"]:1})
-                                        original_weight = 1
-                                    q.parent_map.update({x["hash"]:x["parentHash"]})
-                                    child = x["hash"]
-                                    parent = q.parent_map.get(child)
-                                    parent_weight = q.weight.get(parent)
-                                    if parent_weight is None:
-                                        q.weight.update({parent: original_weight})
-                                    else:
-                                        while not (parent is None):
-                                            parent_weight = parent_weight + original_weight
-                                            q.weight.update({parent: parent_weight})
-                                            child = parent
-                                            parent = q.parent_map.get(child)
-                                            parent_weight = q.weight.get(parent)
-                                else:
-                                    if q.parent_map.get(x["hash"]) != x["parentHash"]:
-                                        print("exception")
-
-                            # logger.debug(node_index,x["hash"],x["parentHash"])
-                        self.task_queue.add_task(intercept_block,self.task_queue,self.listen_node, msg.block_hashes)
-                    self._log_message("receive", "NEW_BLOCK_HASHES, {} hashes {} dictionary".format(len(msg.block_hashes),len(self.task_queue.parent_map)))
+                        q = self.task_queue
+                        t = self.target
+                        q.add_task(t.parse_block_hashes, t, self.node, msg.block_hashes)
+                    self._log_message("receive", "NEW_BLOCK_HASHES, {} hashes".format(len(msg.block_hashes)))
                 elif packet_type == GET_BLOCKS_RESPONSE:
                     self._log_message("receive", "BLOCKS, {} blocks".format(len(msg.blocks)))
                 elif packet_type == GET_CMPCT_BLOCKS_RESPONSE:
@@ -513,11 +485,12 @@ mininode_lock = threading.RLock()
 
 
 class DefaultNode(P2PInterface):
-    def __init__(self, listen_node,remote = False,task_queue = None ):
+    def __init__(self, node, remote=False, task_queue=None, target=None):
         super().__init__(remote)
         self.protocol = b'cfx'
-        self.listen_node = listen_node
+        self.node = node
         self.task_queue = task_queue
+        self.target = target
         self.protocol_version = 1
 
 
@@ -564,7 +537,7 @@ def network_thread_join(timeout=10):
         assert not thread.is_alive()
 
 
-def start_p2p_connection(nodes, remote=False, task_queue=None):
+def start_p2p_connection(nodes, remote=False, task_queue=None, target=None):
     '''
     :param nodes:
     :param remote:
@@ -573,7 +546,7 @@ def start_p2p_connection(nodes, remote=False, task_queue=None):
     p2p_connections = []
 
     for node in nodes:
-        conn = DefaultNode(node, remote, task_queue)
+        conn = DefaultNode(node, remote, task_queue, target)
         p2p_connections.append(conn)
         node.add_p2p_connection(conn)
     network_thread_start()
