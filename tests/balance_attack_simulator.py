@@ -59,7 +59,7 @@ class Simulator:
         ltarget = list(range(0, self.e.num_nodes, 2))
         rtarget = list(range(1, self.e.num_nodes, 2))
         for i in ltarget:
-            self.nodes[i].ltree = 1
+            self.nodes[i].ltree = 0
         for i in rtarget:
             self.nodes[i].rtree = 1
 
@@ -97,8 +97,8 @@ class Simulator:
                         for j in target:
                             self.history.put((timestamp+random.randrange(0,1), j, chirality, blk))
             else:
-                #miner = (miner + 1) % (self.e.num_nodes - 1)
-                miner = random.randint(0, self.e.num_nodes-1)
+                miner = (miner + 1) % (self.e.num_nodes - 1)
+                #miner = random.randint(0, self.e.num_nodes-1)
                 chirality = "L" if self.nodes[miner].ltree >= self.nodes[miner].rtree else "R"
                 # Update attacker and miner's views
                 self.nodes[miner].received.update({timestamp:True})
@@ -117,7 +117,7 @@ class Simulator:
 
     def broadcast(self, origin_time, index, chirality, blk):
         for i in range(self.e.topo):
-            new_stamp = origin_time + self.e.latency + random.uniform(0, 1)
+            new_stamp = origin_time + self.e.latency # + random.uniform(0, 1)
             self.history.put((new_stamp, self.g[index][i], chirality, blk))
 
 
@@ -149,26 +149,27 @@ class Simulator:
 
 
 
-def slave_simulator(workload):
+def slave_simulator(auxiliary):
     env = Environment()
-    env.num_nodes = 6
+    env.num_nodes = 100
     env.total_period = 0.25
     env.evil_rate = 0.2
     env.latency = 10
     env.topo = 5
-    env.termination_time = 20000
+    env.termination_time = 6000
 
-    res = 0.0
-    for i in range(workload):
-        res += Simulator(env,3).main()
-    return res/workload
+    return Simulator(env,3).main()
 
 if __name__=="__main__":
 
 
-    cpu_num = multiprocessing.cpu_count()
+    cpu_num = multiprocessing.cpu_count()-15
     p = multiprocessing.Pool(cpu_num)
     begin = time.time()
-    print(mean(list(p.map(slave_simulator, [int(320/cpu_num)]*cpu_num))))
+    repeats = 100
+    attack_last_time = sorted(p.map(slave_simulator, [0]*(repeats+1)))
+    samples = 10
+    print("len: %s" % len(attack_last_time))
+    print(list(map(lambda percentile: attack_last_time[int((repeats - 1) * percentile / samples)], range(samples + 1))))
     end = time.time()
     print("Executed in {} seconds".format(end-begin))

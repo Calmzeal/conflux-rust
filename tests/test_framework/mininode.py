@@ -384,10 +384,10 @@ class P2PInterface(P2PConnection):
                 elif packet_type == GET_TERMINAL_BLOCK_HASHES_RESPONSE:
                     self._log_message("receive", "TERMINAL_BLOCK_HASHES, {} hashes".format(len(msg.hashes)))
                 elif packet_type == NEW_BLOCK_HASHES:
-                    if hasattr(self,"task_queue"):
+                    if hasattr(self,"task_queue") and hasattr(self,"env"):
                         q = self.task_queue
-                        t = self.target
-                        q.add_task(t.parse_block_hashes, t, self.node, msg.block_hashes)
+                        e = self.env
+                        q.add_task(e.parse_block_hashes, e, self.node, msg.block_hashes)
                     self._log_message("receive", "NEW_BLOCK_HASHES, {} hashes".format(len(msg.block_hashes)))
                 elif packet_type == GET_BLOCKS_RESPONSE:
                     self._log_message("receive", "BLOCKS, {} blocks".format(len(msg.blocks)))
@@ -485,12 +485,12 @@ mininode_lock = threading.RLock()
 
 
 class DefaultNode(P2PInterface):
-    def __init__(self, node, remote=False, task_queue=None, target=None):
+    def __init__(self, node, remote=False, task_queue=None, env=None):
         super().__init__(remote)
         self.protocol = b'cfx'
         self.node = node
         self.task_queue = task_queue
-        self.target = target
+        self.env = env
         self.protocol_version = 1
 
 
@@ -537,7 +537,7 @@ def network_thread_join(timeout=10):
         assert not thread.is_alive()
 
 
-def start_p2p_connection(nodes, remote=False, task_queue=None, target=None):
+def start_p2p_connection(nodes, remote=False, task_queue=None, env=None):
     '''
     :param nodes:
     :param remote:
@@ -546,7 +546,7 @@ def start_p2p_connection(nodes, remote=False, task_queue=None, target=None):
     p2p_connections = []
 
     for node in nodes:
-        conn = DefaultNode(node, remote, task_queue, target)
+        conn = DefaultNode(node, remote, task_queue, env)
         p2p_connections.append(conn)
         node.add_p2p_connection(conn)
     network_thread_start()
