@@ -354,7 +354,7 @@ class NewBlock(rlp.Serializable):
 
     @classmethod
     def serializable(cls, obj):
-            return True
+        return True
 
     @classmethod
     def serialize(cls, obj):

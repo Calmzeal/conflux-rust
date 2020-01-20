@@ -384,7 +384,7 @@ class P2PInterface(P2PConnection):
                 elif packet_type == GET_TERMINAL_BLOCK_HASHES_RESPONSE:
                     self._log_message("receive", "TERMINAL_BLOCK_HASHES, {} hashes".format(len(msg.hashes)))
                 elif packet_type == NEW_BLOCK_HASHES:
-                    if hasattr(self,"task_queue") and hasattr(self,"env"):
+                    if not (self.task_queue is None or self.env is None):
                         q = self.task_queue
                         e = self.env
                         q.add_task(e.parse_block_hashes, e, self.node, msg.block_hashes)

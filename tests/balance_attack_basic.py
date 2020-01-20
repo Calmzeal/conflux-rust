@@ -20,17 +20,20 @@ class P2PTest(ConfluxTestFramework):
 
     def set_test_params(self):
         self.setup_clean_chain = True
-        self.num_nodes = 6
-        self.start_attack = True
-        self.env = AttackEnvironment(self.num_nodes)
+        self.num_nodes = 2
+        # self.start_attack = True
         self.task_queue = TaskQueue()
-        self.total_period = 0.25
-        self.latency = 300
-        self.out_degree = 2
-        self.termination_time = 5400
-        self.debug_allow_borrow = False
-        self.withold = 0
 
+        self.total_period = 0.25
+        self.latency = 6000
+        self.out_degree = 1
+        self.termination_time = 5400
+
+        self.env = AttackEnvironment(self.num_nodes)
+        self.env.recent_timeout = self.latency
+        self.env.debug_allow_borrow = False
+        self.env.withold = 0
+        self.env.attack_start = False
 
 
 
@@ -71,6 +74,7 @@ class P2PTest(ConfluxTestFramework):
         ''' Set the topology of the network: complete graph;
             Then set the latency over the topology
         '''
+        self.env.nodes = self.nodes
 
         self.neighbors = []
         for i in range(self.num_nodes):
@@ -88,6 +92,7 @@ class P2PTest(ConfluxTestFramework):
             for j in self.neighbors[i]:
                 connect_nodes(self.nodes, i, j)
                 self.nodes[i].addlatency(self.nodes[j].key, self.latency * random.uniform(0.75, 1.25))
+
         self.log.info("Connection Finished")
 
 
@@ -107,23 +112,16 @@ class P2PTest(ConfluxTestFramework):
         # Executed the attacks
         begin = 0
         count = 0
-        after_count = 0
-        scan_freq = 5
-        threshhold = 0
+        scan_freq = 1
+
         merged = False
         e = self.env
-        lblock_queue = queue.Queue()
-        rblock_queue = queue.Queue()
         chain = []
 
-        while self.start_attack:
+        while True:
             # This roughly simulates adversary's mining power
-            time.sleep(random.expovariate(1 / generation_period))
-
-            # Get the subtree weight of the two branches
-            e.update_subtree_params(e.left_fork_hash,e.right_fork_hash)
-            #self.log.info("Left:{}, Right:{}, Delta:{} #Lqueue：{}, Rqueue:{} #Downloading blocks:{}" \
-             #             .format(lweight, rweight, abs(lweight - rweight),lblock_queue.qsize(),rblock_queue.qsize(), len(t.weight)))
+            if e.attack_start:
+                time.sleep(random.expovariate(1 / generation_period))
 
             # Check test's termination
             count += 1
@@ -131,54 +129,51 @@ class P2PTest(ConfluxTestFramework):
                 self.log.info("Not merged after 40 minutes")
                 break
 
-            # Check merge every 100 period of attack
+            # Check merge every freq period of attack
             if count%scan_freq == 0:
                 chain = self.get_chains()
+                hashes = list(map(lambda x:chain[x][e.fork_height][0],range(self.num_nodes)))
+                print(hashes)
 
-                weights = list(map(lambda x:t.weight.get(chain[x][t.fork_height][0]),range(self.num_nodes)))
-                values = set(weights)
                 #print(values)
-                if len(values) <= 2 and begin == 0:
+                if hashes.count(e.left_fork_hash)==int(self.num_nodes/2) and hashes.count(e.right_fork_hash)==int(self.num_nodes/2) and begin == 0:
                     begin = time.time()
+                    e.attack_start = True
                     print("Attack-begins")
-                    threshhold = 0
                 merged = True
                 for i in range(self.num_nodes-1):
-                    merged &= chain[i][t.fork_height][0] == chain[i+1][t.fork_height][0]
+                    merged &= chain[i][e.fork_height][0] == chain[i+1][e.fork_height][0]
 
                 #self.check_chain_heavy(chain[0], 0, t.fork_height)
                 if merged:
                     print(time.time()-begin)
                     self.log.info("Pivot chain merged")
-                    scan_freq = 1
-                    after_count += 1
-                    #if after_count >= 20 / generation_period:
-                    self.log.info("Merged. Winner: %s among [%s,%s]", chain[0][t.fork_height][0],t.lhash,t.rhash)
+                    self.log.info("Merged. Winner: %s among [%s,%s]", chain[0][e.fork_height][0], e.left_fork_hash, e.right_fork_hash)
                     break
-                elif after_count > 0:
-                    after_count = 0
-                    scan_freq = 5
 
-            # Attack even pivot chain are merged
-            to_left = lweight + lblock_queue.qsize() <= rweight + rblock_queue.qsize()
-            parent, q = (t.lhash, lblock_queue) if to_left else (t.rhash, rblock_queue)
-            q.put(NewBlock(
-                create_block(decode_hex(parent), height=t.fork_height + 1, deferred_receipts_root=t.receipts_root,
-                             difficulty=self.difficulty, timestamp=int(time.time()),
-                             author=decode_hex("%040x" % random.randint(0, 2 ** 32 - 1)))))
+            e.update_subtree_params(e.left_fork_hash, e.right_fork_hash)
+            # Decide attack target
+            withhold_queue, chirality, target = (e.left_withheld_blocks_queue, e.left_fork_hash, e.nodes_to_keep_left) \
+                if e.left_withheld_blocks_queue.qsize() + e.left_subtree_weight \
+                   < e.right_withheld_blocks_queue.qsize() + e.right_subtree_weight else \
+                (e.right_withheld_blocks_queue, e.right_fork_hash, e.nodes_to_keep_right)
 
-            send_count = (abs(lweight - rweight) + int((1 - self.evil_rate) / self.evil_rate)) if merged else abs(lweight - rweight)
-            if send_count>=threshhold:
-                group, targetlist = ("right", t.rtarget) if (lweight-rweight>0) else ("left", t.ltarget)
-                if merged:
-                    group, targetlist = ("right", t.rtarget) if (t.rhash != chain[0][t.fork_height][0]) else ("left", t.ltarget)
-                for k in range(send_count):
-                    if q.empty():
-                        break
-                    blk = q.get()
-                    for i in targetlist:
-                        self.nodes[i].p2p.send_protocol_msg(blk)
-                    self.log.info("send to %s group block %s", group, blk.block.hash_hex())
+            timestamp=int(time.time())
+            withhold_queue.put(NewBlock(
+                create_block(decode_hex(chirality), height=e.fork_height + 1, deferred_receipts_root=e.receipts_root,
+                difficulty=e.difficulty, timestamp=timestamp,
+                author=decode_hex("%040x" % random.randint(0, 2 ** 32 - 1)))))
+            e.maintain_recent_blocks(timestamp)
+            e.adversary_strategy(
+                e.left_subtree_weight - e.right_subtree_weight
+                - len(e.honest_left_recent_sent_blocks) + len(e.honest_right_recent_sent_blocks),
+                timestamp,
+                [e.nodes_to_keep_left, e.nodes_to_keep_right],
+                [e.left_withheld_blocks_queue, e.right_withheld_blocks_queue],
+            )
+
+
+
         os.system("killall conflux")
         exit()
 
@@ -221,18 +216,6 @@ class P2PTest(ConfluxTestFramework):
         while not self.scan_chains_successfully():
             time.sleep(0.1)
 
-        # Initialize adversary.
-        self.left_withheld_blocks_queue = queue.Queue()
-        self.right_withheld_blocks_queue = queue.Queue()
-        self.total_borrowed_blocks = 0
-        self.left_borrowed_blocks = 0
-        self.right_borrowed_blocks = 0
-        self.withhold_done = False
-        # The number of recent blocks mined under left side sent to the network.
-        self.adv_left_recent_sent_blocks = collections.deque()
-        self.adv_right_recent_sent_blocks = collections.deque()
-        self.honest_left_recent_sent_blocks = collections.deque()
-        self.honest_right_recent_sent_blocks = collections.deque()
 
 
     # Convert weight to integer
@@ -261,12 +244,25 @@ class AttackEnvironment:
         self.weight = {}
 
 
+        # Initialize adversary.
+        self.left_withheld_blocks_queue = queue.Queue()
+        self.right_withheld_blocks_queue = queue.Queue()
+        self.total_borrowed_blocks = 0
+        self.left_borrowed_blocks = 0
+        self.right_borrowed_blocks = 0
+        self.withhold_done = False
+        # The number of recent blocks mined under left side sent to the network.
+        self.adv_left_recent_sent_blocks = collections.deque()
+        self.adv_right_recent_sent_blocks = collections.deque()
+        self.honest_left_recent_sent_blocks = collections.deque()
+        self.honest_right_recent_sent_blocks = collections.deque()
+
         def _lambda(env, node, new_block_hashes):
 
             for h in new_block_hashes:
 
                 x = RpcClient(node).block_by_hash(encode_hex(h))
-                difficulty = int(x['difficulty'],0)
+                difficulty = int(x['difficulty'], 0)
                 if difficulty > env.difficulty * 240:
                     print(f"Heavy block comes from node {node.index} with difficulty {difficulty}")
                 relative_weight = int(difficulty/env.difficulty)
@@ -293,12 +289,15 @@ class AttackEnvironment:
                             parent = env.parent_map.get(child)
                             parent_weight = env.weight.get(parent)
 
-                env.adversary_strategy(
-                    False,
-                    env.left_subtree_weight - env.right_subtree_weight
-                    - len(env.honest_left_recent_sent_blocks) + len(env.honest_right_recent_sent_blocks),
-                    [env.nodes_to_keep_left, env.nodes_to_keep_right],
-                    [env.left_withheld_blocks_queue, env.right_withheld_blocks_queue])
+                if hasattr(env,"left_subtree_weight"):
+                    env.update_subtree_params(env.left_fork_hash,env.right_fork_hash)
+                    env.adversary_strategy(
+                        env.left_subtree_weight - env.right_subtree_weight
+                        - len(env.honest_left_recent_sent_blocks) + len(env.honest_right_recent_sent_blocks),
+                        int(time.time()),
+                        [env.nodes_to_keep_left, env.nodes_to_keep_right],
+                        [env.left_withheld_blocks_queue, env.right_withheld_blocks_queue],
+                    )
 
 
         self.parse_block_hashes = _lambda
@@ -318,6 +317,8 @@ class AttackEnvironment:
             self.nodes_to_keep_left.remove(self.right_leader)
             self.nodes_to_keep_right.append(self.right_leader)
 
+
+
     def update_subtree_params(self,lhash,rhash):
         # return update being successful or not
         l = self.weight.get(lhash)
@@ -329,7 +330,17 @@ class AttackEnvironment:
             self.right_subtree_weight = r
             return True
 
-    def adversary_send_withheld_block(self, chirality, target):
+    def maintain_recent_blocks(self, timestamp):
+        non_recent_timestamp = timestamp - self.recent_timeout
+        for recent_sent_blocks in [
+            self.adv_left_recent_sent_blocks, self.adv_right_recent_sent_blocks,
+            self.honest_left_recent_sent_blocks, self.honest_right_recent_sent_blocks,
+        ]:
+            while len(recent_sent_blocks) > 0 \
+                and recent_sent_blocks[0][0] <= non_recent_timestamp:
+                recent_sent_blocks.popleft()
+
+    def adversary_send_withheld_block(self, chirality, target, timestamp):
         if chirality == "L":
             withheld_queue = self.left_withheld_blocks_queue
             recent_sent_blocks = self.adv_left_recent_sent_blocks
@@ -337,47 +348,49 @@ class AttackEnvironment:
             withheld_queue = self.right_withheld_blocks_queue
             recent_sent_blocks = self.adv_right_recent_sent_blocks
         if withheld_queue.empty():
+            blk_map = lambda hash:NewBlock(
+                             create_block(decode_hex(hash), height=t.fork_height + 1, deferred_receipts_root=self.receipts_root,
+                             difficulty=self.difficulty, timestamp=timestamp,
+                             author=decode_hex("%040x" % random.randint(0, 2 ** 32 - 1))))
             if self.debug_allow_borrow:
                 self.total_borrowed_blocks += 1
                 if chirality == "L":
                     self.left_borrowed_blocks += 1
+                    blk = blk_map(self.left_fork_hash)
                 else:
                     self.right_borrowed_blocks += 1
-                blk = -self.total_borrowed_blocks
+                    blk = blk_map(self.right_fork_hash)
             else:
                 return
         else:
             blk = withheld_queue.get()
 
-        if chirality == "L":
-            self.left_subtree_weight += 1
-        else:
-            self.right_subtree_weight += 1
-
-        for node in target:
-            self.message_queue.put((timestamp, node, chirality, blk))
-
+        for i in target:
+            self.nodes[i].p2p.send_protocol_msg(blk)
+        print("send to %s group block %s", chirality, blk.block.hash_hex())
+        self.update_subtree_params(self.left_fork_hash,self.right_fork_hash)
+        print(target,self.left_subtree_weight,self.right_subtree_weight)
         recent_sent_blocks.append((timestamp, blk))
         self.maintain_recent_blocks(timestamp)
 
 
 
     def adversary_strategy(self,
-                           adversary_mined,
                            global_subtree_weight_diff,
+                           timestamp,
                            targets,
                            withhold_queues,
-                           block):
-        if withhold_queues[0].qsize() + withhold_queues[1].qsize() >= self.attack_params["withhold"]:
+                          ):
+        if withhold_queues[0].qsize() + withhold_queues[1].qsize() >= self.withold:
             self.withhold_done = True
 
         adv_recent_sent_left = len(self.adv_left_recent_sent_blocks)
         adv_recent_sent_right = len(self.adv_right_recent_sent_blocks)
         approx_right_target_subtree_weight_diff = global_subtree_weight_diff - adv_recent_sent_left
         approx_left_target_subtree_weight_diff = global_subtree_weight_diff + adv_recent_sent_right
-        extra_send = 0
-        left_send_count = -approx_left_target_subtree_weight_diff + extra_send
-        right_send_count = approx_right_target_subtree_weight_diff + 1 + extra_send
+        #extra_send = 0
+        left_send_count = -approx_left_target_subtree_weight_diff # + extra_send
+        right_send_count = approx_right_target_subtree_weight_diff + 1 # + extra_send
 
         # Debug output only, estimation.
         """
@@ -402,11 +415,11 @@ class AttackEnvironment:
 
         if (self.debug_allow_borrow or self.withhold_done) and left_send_count > 0:
             for i in range(left_send_count):
-                self.adversary_send_withheld_block("L", block, targets[0])
+                self.adversary_send_withheld_block("L",  targets[0], timestamp)
 
         if (self.debug_allow_borrow or self.withhold_done) and right_send_count > 0:
             for i in range(right_send_count):
-                self.adversary_send_withheld_block("R", block, targets[1])
+                self.adversary_send_withheld_block("R", targets[1], timestamp)
 
 
 class TaskQueue(queue.Queue):
